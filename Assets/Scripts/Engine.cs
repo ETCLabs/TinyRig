@@ -13,13 +13,21 @@ public class Engine : MonoBehaviour
   [SerializeField] List<Fixture> fixtures_ = new List<Fixture>();
   public UI ui_ = null;
 
+  class Universe
+  {
+    public byte priority = 0;
+    public byte[] values = null;
+    public float timestamp = 0;
+  }
+
   Settings settings_ = null;
   bool sacn_started_ = false;
   bool sacn_packet_received_ = false;
   bool sacn_on_ = false;
   SacnReceiver sacn_ = null;
-  readonly object universes_lock_ = new object();
-  Dictionary<UInt16, byte[]> universes_ = new Dictionary<UInt16, byte[]>();
+  readonly object incoming_universes_lock_ = new object();
+  Dictionary<UInt16, Universe> incoming_universes_ = new Dictionary<UInt16, Universe>();
+  Dictionary<UInt16, Universe> universes_ = new Dictionary<UInt16, Universe>();
 
   public List<Fixture> fixtures
   {
@@ -46,9 +54,9 @@ public class Engine : MonoBehaviour
     sacn_ = null;
     sacn_packet_received_ = false;
 
-    lock (universes_lock_)
+    lock (incoming_universes_lock_)
     {
-      universes_.Clear();
+      incoming_universes_.Clear();
     }
 
     HashSet<ushort> universes = settings_.universes;
@@ -70,9 +78,13 @@ public class Engine : MonoBehaviour
       if (packet.DMPLayer.StartCode != 0)
         return;
 
-      lock (universes_lock_)
-      {
-        universes_[packet.FramingLayer.Universe] = packet.DMPLayer.PropertyValues.ToArray();
+      Universe universe = new Universe();
+      universe.priority = packet.FramingLayer.Priority;
+      universe.values = packet.DMPLayer.PropertyValues.ToArray();
+
+      lock (incoming_universes_lock_)
+      { 
+        incoming_universes_[packet.FramingLayer.Universe] = universe;
       }
     };
 
@@ -96,14 +108,25 @@ public class Engine : MonoBehaviour
     if (!sacn_on_)
       return;
 
-    lock (universes_lock_)
+    lock (incoming_universes_lock_)
     {
-      foreach (KeyValuePair<UInt16, byte[]> entry in universes_)
+      foreach (KeyValuePair<UInt16, Universe> incoming in incoming_universes_)
       {
+        Universe existing = null;
+        if (universes_.TryGetValue(incoming.Key, out existing) && existing.priority > incoming.Value.priority)
+        {
+          float elapsed = Time.realtimeSinceStartup - existing.timestamp;
+          if (elapsed < 2.5f)
+            continue;
+        }
+
+        incoming.Value.timestamp = Time.realtimeSinceStartup;
+        universes_[incoming.Key] = incoming.Value;
+
         foreach (Fixture fixture in fixtures_)
-          fixture.RecvDMX(settings_, entry.Key, entry.Value);
+          fixture.RecvDMX(settings_, incoming.Key, incoming.Value.values);
       }
-      universes_.Clear();
+      incoming_universes_.Clear();
     }
   }
 
